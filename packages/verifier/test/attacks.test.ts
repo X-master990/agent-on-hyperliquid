@@ -1,0 +1,281 @@
+import { describe, it, expect, beforeEach } from "vitest";
+import { TAG, tagged, canonicalBytes, getProof, toHex, randomBytes, type Hex } from "@mandate/core";
+import { encodeAsset, type OrderBody, type Order } from "@mandate/chain";
+import { MemoryNonceStore, type NonceStore } from "@mandate/verifier";
+import {
+  makeWorld,
+  makeTree,
+  orderBody,
+  signOrder,
+  signMandate,
+  assetProof,
+  expectReject,
+  expectOk,
+  NOW,
+  DAY,
+  USDC,
+  type World,
+} from "../../chain/test/fixtures.js";
+import { makeVerifier } from "./helpers.js";
+
+/** 每條不變量至少一個負面測試。名稱以 INV-n 開頭。 */
+describe("verifier/attacks", () => {
+  let w: World;
+  let leafId: Hex;
+  beforeEach(async () => {
+    w = await makeWorld();
+    leafId = w.c2.body.mandateId;
+  });
+
+  /* ---------- INV-1 ---------- */
+
+  it("INV-1: order body signed under MANDATE tag presented as an order → rejected (surfaces at 'sig')", async () => {
+    const { pv } = makeVerifier(w);
+    const body = orderBody(leafId);
+    const sig = await w.C.sign(tagged(TAG.MANDATE, canonicalBytes(body)));
+    expectReject(await pv.verifyOrder(w.chain, { body, sig }), "sig");
+  });
+
+  it("INV-1: order body.v !== 1 → reject at 'tag'", async () => {
+    const { pv } = makeVerifier(w);
+    const order = await signOrder(w.C, { ...orderBody(leafId), v: 2 } as unknown as OrderBody);
+    expectReject(await pv.verifyOrder(w.chain, order), "tag");
+    expectReject(await pv.verifyOrder(w.chain, { sig: order.sig } as unknown as Order), "tag");
+  });
+
+  /* ---------- INV-5 ---------- */
+
+  it("INV-5: order.audience = 'signer-Y' → reject at 'audience'", async () => {
+    const { pv } = makeVerifier(w);
+    const order = await signOrder(w.C, orderBody(leafId, { audience: "signer-Y" }));
+    expectReject(await pv.verifyOrder(w.chain, order), "audience");
+  });
+
+  /* ---------- INV-6 / INV-7 ---------- */
+
+  it("INV-6: order carries its own assetsRoot field → ignored; proof checked against leaf.scope.assetsRoot", async () => {
+    const { pv } = makeVerifier(w);
+    const evilAssets = ["BTC", "ETH", "SOL", "DOGE"];
+    const evilTree = makeTree(evilAssets);
+    const body = {
+      ...orderBody(leafId, { asset: "DOGE", assetProof: assetProof("DOGE", evilTree, evilAssets) }),
+      assetsRoot: evilTree.root, // 請求方自填 root
+    } as unknown as OrderBody;
+    const order = await signOrder(w.C, body);
+    const r = expectReject(await pv.verifyOrder(w.chain, order), "scope");
+    expect(r.reason).toMatch(/whitelist/);
+  });
+
+  it("INV-7: valid proof against a different root (tree containing DOGE) → reject at 'scope'", async () => {
+    const { pv } = makeVerifier(w);
+    const evilAssets = ["DOGE", "BTC"];
+    const evilTree = makeTree(evilAssets);
+    const order = await signOrder(w.C, orderBody(leafId, { asset: "DOGE", assetProof: getProof(evilTree, 0) }));
+    expectReject(await pv.verifyOrder(w.chain, order), "scope");
+    // 同一棵假樹裡的 BTC 也不行：proof 對的是假 root
+    const order2 = await signOrder(w.C, orderBody(leafId, { asset: "BTC", assetProof: getProof(evilTree, 1) }));
+    expectReject(await pv.verifyOrder(w.chain, order2), "scope");
+  });
+
+  it("INV-7: proof for a different asset of the right tree does not prove the claimed asset", async () => {
+    const { pv } = makeVerifier(w);
+    const order = await signOrder(w.C, orderBody(leafId, { asset: "DOGE", assetProof: assetProof("BTC") }));
+    expectReject(await pv.verifyOrder(w.chain, order), "scope");
+  });
+
+  /* ---------- INV-8 ---------- */
+
+  it("INV-8: order missing nonce → reject at 'fields'", async () => {
+    const { pv } = makeVerifier(w);
+    const { nonce: _drop, ...rest } = orderBody(leafId);
+    const order = await signOrder(w.C, rest as OrderBody);
+    expectReject(await pv.verifyOrder(w.chain, order), "fields");
+  });
+
+  it("INV-8: order missing mandateId / audience / expiresAt → reject at 'fields'", async () => {
+    const { pv } = makeVerifier(w);
+    for (const key of ["mandateId", "audience", "expiresAt", "issuedAt", "assetProof"] as const) {
+      const body = { ...orderBody(leafId) };
+      delete (body as Partial<OrderBody>)[key];
+      const order = await signOrder(w.C, body);
+      expectReject(await pv.verifyOrder(w.chain, order), "fields");
+    }
+  });
+
+  it("INV-8: order signed by A's key under C's mandate → reject at 'sig'", async () => {
+    const { pv } = makeVerifier(w);
+    const order = await signOrder(w.A, orderBody(leafId));
+    expectReject(await pv.verifyOrder(w.chain, order), "sig");
+    const orderB = await signOrder(w.B, orderBody(leafId)); // B 是 c2 的 issuer，也不行
+    expectReject(await pv.verifyOrder(w.chain, orderB), "sig");
+  });
+
+  it("INV-8: order.mandateId points to c1 while chain leaf is c2 → reject at 'link'", async () => {
+    const { pv } = makeVerifier(w);
+    const order = await signOrder(w.C, orderBody(w.c1.body.mandateId));
+    expectReject(await pv.verifyOrder(w.chain, order), "link");
+    // B（c1 的 subject）簽、mandateId 指 c1、但附的是到 c2 的整條鏈：sig 對 leaf.subject=C 驗不過
+    const orderB = await signOrder(w.B, orderBody(w.c1.body.mandateId));
+    expectReject(await pv.verifyOrder(w.chain, orderB), "sig");
+    // 正確作法：B 附到 c1 為止的鏈
+    expectOk(await pv.verifyOrder({ mandates: [w.c0, w.c1] }, await signOrder(w.B, orderBody(w.c1.body.mandateId))));
+  });
+
+  /* ---------- INV-9 ---------- */
+
+  it("INV-9: same signed order submitted twice → second rejected at 'nonce'", async () => {
+    const { pv, nonces } = makeVerifier(w);
+    const order = await signOrder(w.C, orderBody(leafId));
+    expectOk(await pv.verifyOrder(w.chain, order));
+    expectReject(await pv.verifyOrder(w.chain, order), "nonce");
+    expect(nonces.size()).toBe(1);
+    // 重新簽同一個 nonce（不同 body）也擋
+    const reuse = await signOrder(w.C, orderBody(leafId, { nonce: order.body.nonce, notional: USDC(1) }));
+    expectReject(await pv.verifyOrder(w.chain, reuse), "nonce");
+  });
+
+  it("INV-9: expired order → reject at 'time'", async () => {
+    const { pv } = makeVerifier(w);
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW - 120, expiresAt: NOW - 60 }))), "time");
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW - 120, expiresAt: NOW }))), "time"); // now < expiresAt 嚴格
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW + 5, expiresAt: NOW + 60 }))), "time"); // 未來
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW, expiresAt: NOW }))), "time");
+  });
+
+  it("INV-9: nonce store is not consulted for orders rejected earlier (no nonce burn)", async () => {
+    const calls: string[] = [];
+    const inner = new MemoryNonceStore();
+    const spy: NonceStore = {
+      seenOrRecord: (n, e) => {
+        calls.push(n);
+        return inner.seenOrRecord(n, e);
+      },
+      prune: (t) => inner.prune(t),
+      size: () => inner.size(),
+    };
+    const { pv } = makeVerifier(w, { nonces: spy });
+    const bad = await signOrder(w.C, orderBody(leafId, { notional: USDC(12_000) }));
+    expectReject(await pv.verifyOrder(w.chain, bad), "scope");
+    const badSig = await signOrder(w.A, orderBody(leafId));
+    expectReject(await pv.verifyOrder(w.chain, badSig), "sig");
+    expect(calls).toEqual([]);
+    expect(inner.size()).toBe(0);
+    // 同樣的 nonce 之後用在合法單上仍可通過
+    const good = await signOrder(w.C, orderBody(leafId, { nonce: bad.body.nonce }));
+    expectOk(await pv.verifyOrder(w.chain, good));
+    expect(calls).toEqual([bad.body.nonce]);
+  });
+
+  /* ---------- INV-10b ---------- */
+
+  it("INV-10b: notional 12k under maxNotional 10k → reject at 'scope'", async () => {
+    const { pv } = makeVerifier(w);
+    const order = await signOrder(w.C, orderBody(leafId, { notional: USDC(12_000) }));
+    expectReject(await pv.verifyOrder(w.chain, order), "scope");
+    // 10k + 1 最小單位也擋
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { notional: USDC(10_000) + 1n }))), "scope");
+  });
+
+  it("INV-10b: leverage 300 under max 200 → reject at 'scope'", async () => {
+    const { pv } = makeVerifier(w);
+    const order = await signOrder(w.C, orderBody(leafId, { leverageBps: 300 }));
+    expectReject(await pv.verifyOrder(w.chain, order), "scope");
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { leverageBps: 201 }))), "scope");
+  });
+
+  it("INV-10b: asset ETH under {BTC} → reject at 'scope'", async () => {
+    const wb = await makeWorld({ assets: ["BTC"] });
+    const { pv } = makeVerifier(wb);
+    // ETH 不在 {BTC} 樹裡，攻擊者只能拿別棵樹的 proof
+    const order = await signOrder(wb.C, orderBody(wb.c2.body.mandateId, { asset: "ETH", assetProof: assetProof("ETH") }));
+    expectReject(await pv.verifyOrder(wb.chain, order), "scope");
+    // 對照：BTC 可以
+    expectOk(await pv.verifyOrder(wb.chain, await signOrder(wb.C, orderBody(wb.c2.body.mandateId, {}, wb))));
+  });
+
+  it("INV-10b: order issuedAt outside window → reject at 'scope'", async () => {
+    const { pv } = makeVerifier(w);
+    // window = [NOW-1d, NOW+30d]；issuedAt 在窗前、但未過期、不在未來
+    const order = await signOrder(w.C, orderBody(leafId, { issuedAt: NOW - 2 * DAY, expiresAt: NOW + 60 }));
+    expectReject(await pv.verifyOrder(w.chain, order), "scope");
+  });
+
+  it("INV-10b: verification time outside window → reject at 'scope'", async () => {
+    // 窗已關（NOW-100）但授權未過期；訂單 issuedAt 在窗內
+    const ww = await makeWorld({ window: { notBefore: NOW - DAY, notAfter: NOW - 100 } });
+    const { pv } = makeVerifier(ww);
+    const order = await signOrder(ww.C, orderBody(ww.c2.body.mandateId, { issuedAt: NOW - 200, expiresAt: NOW + 60 }));
+    expectReject(await pv.verifyOrder(ww.chain, order), "scope");
+  });
+
+  it("INV-10b: negative notional / leverage are rejected at 'fields', not silently ≤ max", async () => {
+    const { pv } = makeVerifier(w);
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { notional: -1n }))), "fields");
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { leverageBps: -1 }))), "fields");
+    // 浮點連簽都簽不了（canonicalBytes 拒絕非整數）；改成事後竄改，驗證器在 'fields' 擋，不會跑到 sig
+    const signed = await signOrder(w.C, orderBody(leafId));
+    const tampered = { body: { ...signed.body, leverageBps: 1.5 }, sig: signed.sig };
+    expectReject(await pv.verifyOrder(w.chain, tampered), "fields");
+    await expect(signOrder(w.C, orderBody(leafId, { leverageBps: 1.5 }))).rejects.toThrow(/non-integer/);
+  });
+
+  /* ---------- 撤銷 ---------- */
+
+  it("revocation: revoke c1 → C's next order rejected at 'revoked'", async () => {
+    const { pv, revocations } = makeVerifier(w);
+    const order = await signOrder(w.C, orderBody(leafId));
+    expectOk(await pv.verifyOrder(w.chain, order));
+    revocations.revoke(w.c1.body.mandateId, NOW);
+    const r = expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId))), "revoked");
+    expect(r.at).toBe(1);
+    // B 自己（c1 的 subject）也不能再用 c1
+    expectReject(await pv.verifyOrder({ mandates: [w.c0, w.c1] }, await signOrder(w.B, orderBody(w.c1.body.mandateId))), "revoked");
+    // A 用 c0 仍可以
+    expectOk(await pv.verifyOrder({ mandates: [w.c0] }, await signOrder(w.A, orderBody(w.c0.body.mandateId))));
+  });
+
+  /* ---------- 鏈錯誤傳遞 / INV-12 / INV-13 ---------- */
+
+  it("INV-12: forged root (D self-signs a 'leader' mandate) → reject at 'root' before reading the order", async () => {
+    const { pv } = makeVerifier(w);
+    const fake = await signMandate(w.D, { ...w.c0.body, issuer: w.D.publicKey, subject: w.C.publicKey, maxDepth: 0 });
+    const order = await signOrder(w.C, orderBody(fake.body.mandateId));
+    expectReject(await pv.verifyOrder({ mandates: [fake] }, order), "root", 0);
+  });
+
+  it("INV-13: chain failure is returned as-is and the order is never examined", async () => {
+    let verifyCalls = 0;
+    const { pv } = makeVerifier(w, {
+      sigv: {
+        verify: async (pub, bytes, sig) => {
+          verifyCalls++;
+          return (await import("@mandate/core")).ed25519Verifier.verify(pub, bytes, sig);
+        },
+      },
+    });
+    const spliced = await signMandate(w.D, { ...w.c1.body, issuer: w.D.publicKey });
+    const garbageOrder = { body: null, sig: "0x" } as unknown as Order;
+    const r = expectReject(await pv.verifyOrder({ mandates: [w.c0, spliced, w.c2] }, garbageOrder), "link", 1);
+    expect(r.at).toBe(1);
+    expect(verifyCalls).toBe(2); // c0, spliced；c2 與訂單都沒驗
+  });
+
+  it("INV-13: an order failing at 'sig' with a bad scope stops at 'sig'", async () => {
+    const { pv, nonces } = makeVerifier(w);
+    const order = await signOrder(w.D, orderBody(leafId, { notional: USDC(999_999), leverageBps: 9999, audience: "signer-Y" }));
+    expectReject(await pv.verifyOrder(w.chain, order), "sig");
+    expect(nonces.size()).toBe(0);
+  });
+
+  it("INV-6: the decision's mandate is the frozen verified copy, not the caller's object", async () => {
+    const { pv } = makeVerifier(w);
+    const order = await signOrder(w.C, orderBody(leafId));
+    const d = expectOk(await pv.verifyOrder(w.chain, order));
+    expect(d.mandate.body).not.toBe(w.c2.body);
+    expect(d.mandate.body).toEqual(w.c2.body);
+    expect(Object.isFrozen(d.mandate.body.scope)).toBe(true);
+    expect(d.order.body).not.toBe(order.body);
+    expect(toHex(randomBytes(1))).toMatch(/^0x[0-9a-f]{2}$/);
+    expect(encodeAsset("BTC")).toEqual(new TextEncoder().encode("BTC"));
+  });
+});

@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "paths": {
+      "@mandate/core": ["./packages/core/src/index.ts"],
+      "@mandate/chain": ["./packages/chain/src/index.ts"],
+      "@mandate/verifier": ["./packages/verifier/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/src", "packages/*/test", "examples"]
+}

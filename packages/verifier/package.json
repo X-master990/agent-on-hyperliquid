@@ -1,0 +1,8 @@
+{
+  "name": "@mandate/verifier",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": { "@mandate/core": "workspace:*", "@mandate/chain": "workspace:*" }
+}
