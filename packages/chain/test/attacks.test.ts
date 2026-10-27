@@ -64,6 +64,40 @@ describe("chain/attacks", () => {
     expectReject(await verify([]), "fields");
   });
 
+  it("INV-4: malformed hex fields (sig / mandateId / parentId / issuer / subject) → reject at 'fields'", async () => {
+    // sig 壞掉必須停在 'fields'，不是 'sig'（INV-13：欄位先於簽章，畸形輸入不做簽章運算）
+    expectReject(await verify([{ body: w.c0.body, sig: "0x1234" }]), "fields", 0);
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, mandateId: "0x1234" } as unknown as MandateBody)]), "fields", 0);
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, parentId: "0xzz" } as unknown as MandateBody)]), "fields", 0);
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, issuer: "not-a-key" } as unknown as MandateBody)]), "fields", 0);
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, subject: "0x12" } as unknown as MandateBody)]), "fields", 0);
+  });
+
+  it("INV-4: audience / issuedAt wrong type → reject at 'fields' (not at 'audience' / accepted)", async () => {
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, audience: 123 } as unknown as MandateBody)]), "fields", 0);
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, audience: "" } as unknown as MandateBody)]), "fields", 0);
+    // 負的 issuedAt 若少了欄位檢查會被整條接受（-5 < expiresAt 且 -5 ≤ now）
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, issuedAt: -5 } as unknown as MandateBody)]), "fields", 0);
+  });
+
+  it("INV-4: scope shape and value types → reject at 'fields'", async () => {
+    const r = expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, scope: "yolo" } as unknown as MandateBody)]), "fields", 0);
+    expect(r.reason).toMatch(/not an object/); // 釘住第一道 scope 檢查（後面的 assetsRoot 檢查也會擋，但理由不同）
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, scope: { ...w.c0.body.scope, assetsRoot: "banana" } } as unknown as MandateBody)]), "fields", 0);
+    // 負的 maxLeverageBps 若少了檢查會被接受（比較方向對負數「安全」，但那是運氣不是設計）
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, scope: { ...w.c0.body.scope, maxLeverageBps: -1 } } as unknown as MandateBody)]), "fields", 0);
+    // dailyLoss 型別：v0 不判定值（TODO C3），但型別必須今天就擋，否則 C3 上線即踩雷
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, scope: { ...w.c0.body.scope, dailyLoss: 5 } } as unknown as MandateBody)]), "fields", 0);
+  });
+
+  it("INV-4: inverted scope window (notBefore > notAfter) → reject at 'fields'", async () => {
+    const m = await signMandate(w.leader, {
+      ...w.c0.body,
+      scope: { ...w.c0.body.scope, window: { notBefore: NOW + DAY, notAfter: NOW - DAY } },
+    } as unknown as MandateBody);
+    expectReject(await verify([m]), "fields", 0);
+  });
+
   /* ---------- INV-5 ---------- */
 
   it("INV-5: mandate with audience 'signer-Y' verified by 'signer-X' → reject at 'audience'", async () => {
@@ -209,7 +243,10 @@ describe("chain/attacks", () => {
 
   it("time: issuedAt >= expiresAt → reject at 'time'", async () => {
     const m = await signMandate(w.leader, { ...w.c0.body, issuedAt: NOW - 10, expiresAt: NOW - 10 });
-    expectReject(await verify([m], { ...w.ctx, now: NOW - 10 }), "time", 0);
+    const r = expectReject(await verify([m], { ...w.ctx, now: NOW - 10 }), "time", 0);
+    // 釘住理由：必須由「issuedAt >= expiresAt」這一條擋（INV-13 固定順序），
+    // 而不是靠後面的「已過期」撿到——否則這個檢查形同不存在。
+    expect(r.reason).toMatch(/issuedAt >= expiresAt/);
   });
 
   it("time: child expiresAt later than parent → reject at 'time'", async () => {

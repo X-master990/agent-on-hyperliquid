@@ -102,6 +102,43 @@ describe("verifier/attacks", () => {
     }
   });
 
+  it("INV-8: order.sig not 64-byte hex → reject at 'fields' (no signature work on malformed input)", async () => {
+    const { pv } = makeVerifier(w);
+    const signed = await signOrder(w.C, orderBody(leafId));
+    expectReject(await pv.verifyOrder(w.chain, { body: signed.body, sig: "0x1234" as Hex }), "fields");
+  });
+
+  it("INV-8: side outside 'buy' | 'sell' → reject at 'fields' (nothing downstream reads side)", async () => {
+    // 這是整條管線唯一看 side 的地方：少了它，side:"hold" 的單會被完整接受。
+    const { pv } = makeVerifier(w);
+    for (const side of ["hold", "BUY", "", 1, null]) {
+      const order = await signOrder(w.C, orderBody(leafId, { side } as unknown as Partial<OrderBody>));
+      expectReject(await pv.verifyOrder(w.chain, order), "fields");
+    }
+  });
+
+  it("INV-8: asset must be a non-empty string → reject at 'fields'", async () => {
+    const { pv } = makeVerifier(w);
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { asset: "" }))), "fields");
+    // 數字 asset 不能靠 TextEncoder 的 ToString 坐滑梯進 membership 檢查
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { asset: 123 } as unknown as Partial<OrderBody>))), "fields");
+  });
+
+  it("INV-8: malformed assetProof shape → reject at 'fields' (shape at 'fields', membership at 'scope')", async () => {
+    const { pv } = makeVerifier(w);
+    const good = assetProof("BTC");
+    const bads = [
+      { siblings: "zz", path: good.path },                               // 非陣列
+      { siblings: good.siblings, path: good.path.slice(0, -1) },         // siblings/path 長度不符
+      { siblings: ["0xzz", ...good.siblings.slice(1)], path: good.path },// sibling 非 32-byte hex
+      { siblings: good.siblings, path: [2, ...good.path.slice(1)] },     // path bit 非 0|1
+    ];
+    for (const bad of bads) {
+      const order = await signOrder(w.C, orderBody(leafId, { assetProof: bad } as unknown as Partial<OrderBody>));
+      expectReject(await pv.verifyOrder(w.chain, order), "fields");
+    }
+  });
+
   it("INV-8: order signed by A's key under C's mandate → reject at 'sig'", async () => {
     const { pv } = makeVerifier(w);
     const order = await signOrder(w.A, orderBody(leafId));
@@ -139,7 +176,8 @@ describe("verifier/attacks", () => {
     expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW - 120, expiresAt: NOW - 60 }))), "time");
     expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW - 120, expiresAt: NOW }))), "time"); // now < expiresAt 嚴格
     expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW + 5, expiresAt: NOW + 60 }))), "time"); // 未來
-    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW, expiresAt: NOW }))), "time");
+    const r = expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW, expiresAt: NOW }))), "time");
+    expect(r.reason).toMatch(/issuedAt >= expiresAt/); // 釘住理由：由第一條時間檢查擋，不是靠「已過期」撿到（INV-13）
   });
 
   it("INV-9: nonce store is not consulted for orders rejected earlier (no nonce burn)", async () => {

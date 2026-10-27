@@ -23,6 +23,7 @@ import {
   ed25519Verifier,
   isHexBytes,
   type Hash,
+  type MerkleProof,
 } from "@mandate/core";
 
 const enc = new TextEncoder();
@@ -207,6 +208,38 @@ describe("core/merkle", () => {
     expect(verifyProof(t.root, leaves8[0] as Uint8Array, huge)).toBe(false);
     expect(() => buildTree([])).toThrow();
     expect(() => getProof(t, 8)).toThrow();
+  });
+
+  it("INV-7: guards hold even when the hash walk itself would succeed (mutation-hardened)", () => {
+    // 上面那個測試的髒輸入在「檢查被拔掉」時也會因 h !== root 而 false——殺不死突變。
+    // 這裡每個輸入都構造成「拔掉對應檢查後 verifyProof 會回 true」，所以檢查消失測試必紅。
+    const leaf = leaves8[0] as Uint8Array;
+
+    // (1) 深度上限：手工折出一條在數學上成立的 65 層 hash 走讀
+    let acc = hashLeaf(leaf);
+    const sibs: Hash[] = [];
+    for (let i = 0; i < MAX_PROOF_DEPTH; i++) {
+      const s = hashLeaf(utf8(`sib-${i}`));
+      sibs.push(s);
+      acc = hashNode(acc, s);
+    }
+    // 邊界：剛好 MAX_PROOF_DEPTH 層是合法的
+    expect(verifyProof(acc, leaf, { siblings: [...sibs], path: Array(MAX_PROOF_DEPTH).fill(0) as (0 | 1)[] })).toBe(true);
+    const extra = hashLeaf(utf8("sib-64"));
+    const root65 = hashNode(acc, extra);
+    expect(verifyProof(root65, leaf, { siblings: [...sibs, extra], path: Array(MAX_PROOF_DEPTH + 1).fill(0) as (0 | 1)[] })).toBe(false);
+
+    // (2) siblings/path 長度不符：單葉樹 root = hashLeaf，空 siblings 走讀「少走一步就對」
+    const t1 = buildTree([leaf]);
+    expect(verifyProof(t1.root, leaf, { siblings: [], path: [0] as (0 | 1)[] })).toBe(false);
+
+    // (3) siblings/path 非陣列：必須回 false 而不是丟錯（verifyProof 的不丟錯契約）
+    const t = buildTree(leaves8);
+    const good = getProof(t, 0);
+    expect(verifyProof(t.root, leaf, { siblings: null, path: null } as unknown as MerkleProof)).toBe(false);
+
+    // (4) leafData 非 Uint8Array：同內容的普通陣列若被收下，hash 走讀會完全成立
+    expect(verifyProof(t.root, Array.from(leaf) as unknown as Uint8Array, good)).toBe(false);
   });
 });
 

@@ -79,6 +79,8 @@ export function getProof(tree: MerkleTree, index: number): MerkleProof {
  * 任何格式問題一律回 false，不丟錯。
  */
 export function verifyProof(root: Hash, leafData: Uint8Array, proof: MerkleProof): boolean {
+  // 早退用；行為上被最後的 h === root 蘊含（計算出的 h 恆為小寫 64-hex，
+  // 非法 root 字串永不相等）。突變測試下是等價突變，殺不死屬預期。
   if (!isHexBytes(root, 32)) return false;
   if (!(leafData instanceof Uint8Array)) return false;
   if (typeof proof !== "object" || proof === null) return false;

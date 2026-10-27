@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { ed25519Verifier } from "@mandate/core";
-import { delegate, isSubset, orderWithinScope, verifyChain } from "@mandate/chain";
-import { makeWorld, makeTree, scope, orderBody, expectOk, leafOf, NOW, DAY, USDC, type World } from "./fixtures.js";
+import { delegate, isSubset, issueRoot, orderWithinScope, verifyChain } from "@mandate/chain";
+import { mandateBodyProblem, orderBodyProblem } from "../src/guards.js";
+import { makeWorld, makeTree, scope, orderBody, expectOk, leafOf, AUD, NOW, DAY, USDC, type World } from "./fixtures.js";
 
 describe("chain/happy-path", () => {
   let w: World;
@@ -74,6 +75,31 @@ describe("chain/happy-path", () => {
     await expect(
       delegate(w.A, v0, { subject: w.B.publicKey, issuedAt: NOW, expiresAt: NOW + 365 * DAY, scope: scope() }),
     ).rejects.toThrow(/exceeds parent expiresAt/);
+  });
+
+  it("INV-4: issueRoot() refuses negative maxDepth and inverted lifetime", async () => {
+    // 發行端是禮貌層（真正的防線在 verifyChain），但禮貌層也要有測試，否則形同不存在。
+    const p = { subject: w.A.publicKey, audience: AUD, issuedAt: NOW, expiresAt: NOW + DAY, maxDepth: 1, scope: scope() };
+    await expect(issueRoot(w.leader, { ...p, maxDepth: -1 })).rejects.toThrow();
+    await expect(issueRoot(w.leader, { ...p, expiresAt: NOW })).rejects.toThrow();
+  });
+
+  it("INV-4: delegate() refuses inverted lifetime (expiresAt <= issuedAt)", async () => {
+    const v0 = expectOk(await verifyChain({ mandates: [w.c0] }, w.ctx, ed25519Verifier));
+    await expect(
+      delegate(w.A, v0, { subject: w.B.publicKey, issuedAt: NOW, expiresAt: NOW, scope: scope() }),
+    ).rejects.toThrow();
+  });
+});
+
+describe("chain/guards", () => {
+  it("INV-4/INV-8: body validators reject non-objects without throwing", () => {
+    // verifyChain / verifyOrder 都先檢過 body 是物件才呼叫這兩個函式，
+    // 所以這第一道守衛只能用單元測試殺：拔掉它，null.mandateId 會直接丟 TypeError。
+    expect(mandateBodyProblem(null)).toBe("body: not an object");
+    expect(mandateBodyProblem("x")).toBe("body: not an object");
+    expect(orderBodyProblem(null)).toBe("body: not an object");
+    expect(orderBodyProblem(42)).toBe("body: not an object");
   });
 });
 
