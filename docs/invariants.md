@@ -46,8 +46,11 @@
 **INV-9** 簽名器必須維護「未過期 nonce」帳本，以 `(subject, nonce)` 為鍵；同一 subject 的 nonce 重複或訂單過期一律拒絕；此帳本獨立於交易所的 nonce 狀態。
 — 防重放；防 Hyperliquid API wallet 註銷後 nonce 狀態被清而導致舊單重放。鍵含 subject 防惡意佔用：看見他人在途 nonce 的攻擊者，無法用自己的合法單搶先燒掉它。
 
-**INV-10b** 訂單的每個範圍值必須 ⊆ 所屬授權的 scope（資產 ∈ 白名單、notional ≤ maxNotional、leverage ≤ maxLeverage、時間 ∈ window）；累計型 scope（每日虧損等）由簽名器狀態判定。
+**INV-10b** 訂單的每個範圍值必須 ⊆ 所屬授權的 scope（資產 ∈ 白名單、notional ≤ maxNotional、leverage ≤ maxLeverage、時間 ∈ window）；累計型 scope 由簽名器狀態判定（INV-14）。
 — 防超額、超槓桿、交易未授權資產、窗外交易。
+
+**INV-14** 同一 UTC 日內，經某張授權放行的訂單 Σnotional 必須 ≤ 該授權 scope 的 `dailyNotional`（省略 = 不限），且鏈上**每一層**各自成立；累計檢查在 nonce 之前，入帳在全部檢查通過之後（被拒的單不入帳）。
+— 防一萬筆小單繞過單筆上限；防中間層多發子授權翻倍自己的額度（per-layer 記帳）；防被拒的單消耗額度。
 
 ## 流程層
 
@@ -61,4 +64,4 @@
 
 ### 已拍板（2026-10-28）
 - 時鐘偏移容忍值：issuedAt 容忍 +30 秒、expiresAt 嚴格 → spec/scope-semantics.md §4。
-- 累計型 scope：設計採納於 ADR-0004（C3a dailyNotional、UTC 日界、每層 mandateId 記帳）；C3a 實作與負面測試落地後升格為 **INV-14**：「同一 UTC 日內，經某 mandate 放行的訂單 Σnotional ≤ 該 mandate 的 dailyNotional，鏈上每層各自成立。」
+- 累計型 scope：C3a（dailyNotional）已依 ADR-0004 實作並升格為 INV-14；C3b（dailyLoss）仍待成交回報管道。

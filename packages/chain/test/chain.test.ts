@@ -10,13 +10,21 @@ describe("chain/happy-path", () => {
     w = await makeWorld();
   });
 
-  it("issueRoot → verifyChain([c0]) ok, depth 0", async () => {
+  it("issueRoot → verifyChain([c0]) ok, depth 0; VerifiedChain carries all layers", async () => {
     const v = expectOk(await verifyChain({ mandates: [w.c0] }, w.ctx, ed25519Verifier));
-    expect(v.depth).toBe(0);
-    expect(v.body).toEqual(w.c0.body);
-    expect(v.body.parentId).toBeNull();
-    expect(v.body.issuer).toBe(w.leader.publicKey);
-    expect(v.body.subject).toBe(w.A.publicKey);
+    expect(v.leaf.depth).toBe(0);
+    expect(v.leaf.body).toEqual(w.c0.body);
+    expect(v.leaf.body.parentId).toBeNull();
+    expect(v.leaf.body.issuer).toBe(w.leader.publicKey);
+    expect(v.leaf.body.subject).toBe(w.A.publicKey);
+    expect(v.layers).toHaveLength(1);
+    expect(v.layers[0]).toBe(v.leaf);
+    // 全層版：三層鏈的 layers 由根到末端，leaf 是最後一張
+    const v2 = expectOk(await verifyChain(w.chain, w.ctx, ed25519Verifier));
+    expect(v2.layers).toHaveLength(3);
+    expect(v2.layers[0]?.body.mandateId).toBe(w.c0.body.mandateId);
+    expect(v2.layers[2]).toBe(v2.leaf);
+    expect(Object.isFrozen(v2.layers)).toBe(true);
   });
 
   it("leader → A → B → C: verifyChain ok, depth 2, scope shrinks each hop", async () => {
@@ -47,7 +55,7 @@ describe("chain/happy-path", () => {
   it("delegate() refuses when signer != parent.subject", async () => {
     const v0 = expectOk(await verifyChain({ mandates: [w.c0] }, w.ctx, ed25519Verifier));
     await expect(
-      delegate(w.D, v0, { subject: w.B.publicKey, issuedAt: NOW, expiresAt: NOW + DAY, scope: scope() }),
+      delegate(w.D, v0.leaf, { subject: w.B.publicKey, issuedAt: NOW, expiresAt: NOW + DAY, scope: scope() }),
     ).rejects.toThrow(/not the parent's subject/);
   });
 
@@ -61,7 +69,7 @@ describe("chain/happy-path", () => {
   it("delegate() refuses a widening scope", async () => {
     const v0 = expectOk(await verifyChain({ mandates: [w.c0] }, w.ctx, ed25519Verifier));
     await expect(
-      delegate(w.A, v0, {
+      delegate(w.A, v0.leaf, {
         subject: w.B.publicKey,
         issuedAt: NOW,
         expiresAt: NOW + DAY,
@@ -73,7 +81,7 @@ describe("chain/happy-path", () => {
   it("delegate() refuses expiresAt beyond parent", async () => {
     const v0 = expectOk(await verifyChain({ mandates: [w.c0] }, w.ctx, ed25519Verifier));
     await expect(
-      delegate(w.A, v0, { subject: w.B.publicKey, issuedAt: NOW, expiresAt: NOW + 365 * DAY, scope: scope() }),
+      delegate(w.A, v0.leaf, { subject: w.B.publicKey, issuedAt: NOW, expiresAt: NOW + 365 * DAY, scope: scope() }),
     ).rejects.toThrow(/exceeds parent expiresAt/);
   });
 
@@ -87,7 +95,7 @@ describe("chain/happy-path", () => {
   it("INV-4: delegate() refuses inverted lifetime (expiresAt <= issuedAt)", async () => {
     const v0 = expectOk(await verifyChain({ mandates: [w.c0] }, w.ctx, ed25519Verifier));
     await expect(
-      delegate(w.A, v0, { subject: w.B.publicKey, issuedAt: NOW, expiresAt: NOW, scope: scope() }),
+      delegate(w.A, v0.leaf, { subject: w.B.publicKey, issuedAt: NOW, expiresAt: NOW, scope: scope() }),
     ).rejects.toThrow();
   });
 });
@@ -128,8 +136,18 @@ describe("chain/scope", () => {
     expect(isSubset(child, parent)).toBe(false);
   });
 
-  it("isSubset: dailyLoss is ignored in v0 (TODO C3)", () => {
+  it("isSubset: dailyLoss is ignored in v0 (TODO C3b)", () => {
     expect(isSubset(scope({ dailyLoss: USDC(999_999) }), scope({ dailyLoss: USDC(1) }))).toBe(true);
+  });
+
+  it("INV-10a/INV-14: isSubset on dailyNotional — ≤ passes, exceeding or dropping the field fails", () => {
+    expect(isSubset(scope({ dailyNotional: USDC(5_000) }), scope({ dailyNotional: USDC(10_000) }))).toBe(true);
+    expect(isSubset(scope({ dailyNotional: USDC(10_000) }), scope({ dailyNotional: USDC(10_000) }))).toBe(true);
+    expect(isSubset(scope({ dailyNotional: USDC(10_001) }), scope({ dailyNotional: USDC(10_000) }))).toBe(false);
+    // 省略 = 不限 = 最寬：父層有限制、子層省略 → 放大 → false
+    expect(isSubset(scope({}), scope({ dailyNotional: USDC(10_000) }))).toBe(false);
+    // 父層不限、子層自縮 → true
+    expect(isSubset(scope({ dailyNotional: USDC(10_000) }), scope({}))).toBe(true);
   });
 
   it("orderWithinScope: order inside → true", () => {

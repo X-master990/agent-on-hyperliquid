@@ -2,10 +2,11 @@ import { isHexBytes, type Sig, type SigVerifier } from "@mandate/core";
 import { mandateSigningBytes } from "./bytes.js";
 import { accept, isPlainObject, mandateBodyProblem, reject, snapshot } from "./guards.js";
 import { isSubset } from "./scope.js";
-import type { Chain, Mandate, MandateBody, Result, VerifiedMandate, VerifyContext } from "./types.js";
+import type { Chain, Mandate, MandateBody, Result, VerifiedChain, VerifiedMandate, VerifyContext } from "./types.js";
 
 /**
- * 驗整條鏈，回傳末端的 VerifiedMandate（INV-13 順序）：
+ * 驗整條鏈，回傳 VerifiedChain：全層 layers 與末端 leaf（INV-13 順序；全層供累計型記帳，INV-14）。
+ * 對每個 cᵢ：
  * 對每個 cᵢ：
  *   0. 快照（structuredClone）：之後所有檢查只讀這份 plain data
  *   1. tag / 版本：body.v === 1（INV-1）
@@ -28,7 +29,7 @@ export const CLOCK_SKEW_S = 30;
 /** 鏈長上限：輸入有界（spec §5）。 */
 export const MAX_CHAIN_LENGTH = 16;
 
-export async function verifyChain(chain: Chain, ctx: VerifyContext, sigv: SigVerifier): Promise<Result<VerifiedMandate>> {
+export async function verifyChain(chain: Chain, ctx: VerifyContext, sigv: SigVerifier): Promise<Result<VerifiedChain>> {
   if (!isPlainObject(chain) || !Array.isArray(chain.mandates) || chain.mandates.length === 0) {
     return reject("fields", "chain.mandates must be a non-empty array");
   }
@@ -36,12 +37,14 @@ export async function verifyChain(chain: Chain, ctx: VerifyContext, sigv: SigVer
     return reject("fields", `chain too long (> ${MAX_CHAIN_LENGTH})`); // INV-4：鏈輸入有界
   }
   let prev: VerifiedMandate | null = null;
+  const layers: VerifiedMandate[] = [];
   for (let i = 0; i < chain.mandates.length; i++) {
     const r = await verifyOne(chain.mandates[i], i, prev, ctx, sigv);
     if (!r.ok) return r;
     prev = r.value;
+    layers.push(r.value);
   }
-  return accept(prev as VerifiedMandate);
+  return accept(Object.freeze({ leaf: prev as VerifiedMandate, layers: Object.freeze(layers) }));
 }
 
 async function verifyOne(

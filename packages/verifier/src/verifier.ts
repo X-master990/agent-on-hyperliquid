@@ -19,7 +19,7 @@ import {
 } from "@mandate/chain";
 import type { NonceStore } from "./nonce-store.js";
 import type { RevocationList } from "./revocation.js";
-import type { CumulativeState } from "./state.js";
+import { utcDay, type CumulativeState } from "./state.js";
 
 export interface PolicyVerifierOptions {
   audience: string;
@@ -43,14 +43,14 @@ const systemClock = (): number => Math.floor(Date.now() / 1000);
 /**
  * 政策驗證器（v0 的強制點，先不接 Hyperliquid）。
  * verifyOrder 順序（INV-13）：
- *   1. verifyChain(chain) → leaf: VerifiedMandate（之後所有授權內容只從 leaf 讀，INV-6）
+ *   1. verifyChain(chain) → VerifiedChain{leaf, layers}（之後所有授權內容只從這裡讀，INV-6）
  *   2. order 快照；body.v === 1（INV-1）；欄位齊全（INV-8）
  *   3. Verify(leaf.subject, orderBytes, order.sig)（INV-8）
  *   4. order.mandateId == leaf.mandateId（INV-8）；order.audience == this.audience（INV-5）
  *   5. issuedAt < expiresAt；issuedAt ≤ now + CLOCK_SKEW_S；now < expiresAt（INV-9 的「過期」半邊）
  *   6. verifyProof(leaf.scope.assetsRoot, asset, assetProof)（INV-7；root 只從 leaf 讀，INV-6）
  *   7. orderWithinScope(order, leaf.scope, now)（INV-10b）
- *   8. cumulative（v0 跳過，TODO C3）
+ *   8. 累計型（INV-14 / C3a）：鏈上每層 usedOn + notional ≤ dailyNotional；只檢不記，入帳在 nonce 之後
  *   9. nonces.seenOrRecord(leaf.subject, nonce, expiresAt) == false（INV-9）— 放最後，確保被拒的單不消耗 nonce
  */
 export class PolicyVerifier {
@@ -65,10 +65,10 @@ export class PolicyVerifier {
       isRevoked: (id) => this.opts.revocations.isRevoked(id),
     };
 
-    // 1. 先驗鏈（INV-13）；leaf 是 scope / root / subject 的唯一來源（INV-6）
+    // 1. 先驗鏈（INV-13）；leaf / layers 是 scope / root / subject 的唯一來源（INV-6）
     const chainResult = await verifyChain(chain, ctx, this.opts.sigv);
     if (!chainResult.ok) return chainResult;
-    const leaf = chainResult.value;
+    const { leaf, layers } = chainResult.value;
 
     // 2. 訂單快照 + tag/版本（INV-1）+ 欄位（INV-8）
     let o: unknown;
@@ -113,12 +113,26 @@ export class PolicyVerifier {
       return reject("scope", "order exceeds mandate scope");                                         // INV-10b
     }
 
-    // 8. 累計型 scope：v0 不判定（TODO C3）。this.opts.cumulative 保留給 C3。
+    // 8. 累計型（INV-14 / C3a，ADR-0004）：鏈上每層各自檢，防「多發子授權翻倍額度」。
+    //    只檢不記——入帳在 nonce 之後，被拒的單不消耗額度（INV-13 哲學）。
+    //    此處到入帳之間沒有 await，JS 單執行緒下 check→charge 原子。
+    const day = utcDay(now);
+    let layerIdx = 0;
+    for (const m of layers) {
+      const limit = m.body.scope.dailyNotional;                                                      // 只從 VerifiedMandate 讀（INV-6）
+      if (limit !== undefined && this.opts.cumulative.usedOn(m.body.mandateId, day) + body.notional > limit) {
+        return reject("scope", "daily notional exceeded", layerIdx);                                 // INV-14
+      }
+      layerIdx++;
+    }
 
     // 9. nonce 最後（INV-9）：只有走到這裡的單才會消耗 nonce。鍵為 (subject, nonce)，subject 只從 leaf 讀（INV-6）
     if (this.opts.nonces.seenOrRecord(leaf.body.subject, body.nonce, body.expiresAt)) {
       return reject("nonce", "nonce already seen (replay)");                                         // INV-9
     }
+
+    // 入帳（INV-14）：全部檢查通過後，一張單入帳鏈上每一層（ADR-0004）
+    for (const m of layers) this.opts.cumulative.charge(m.body.mandateId, day, body.notional);
 
     return accept({ mandate: leaf, order: { body, sig } });
   }

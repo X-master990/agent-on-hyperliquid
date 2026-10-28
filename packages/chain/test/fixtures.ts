@@ -81,6 +81,8 @@ export interface WorldOptions {
   assets?: readonly string[];
   /** 覆蓋三層共用的 window（root 相等規則下三層 root 相同，但 window 可各自縮） */
   window?: Scope["window"];
+  /** 各層 scope 的覆蓋 [c0, c1, c2]（C3a 測試用，例如 dailyNotional） */
+  scopes?: readonly [Partial<Scope>?, Partial<Scope>?, Partial<Scope>?];
 }
 
 export async function makeWorld(opt: WorldOptions = {}): Promise<World> {
@@ -106,25 +108,25 @@ export async function makeWorld(opt: WorldOptions = {}): Promise<World> {
     issuedAt: NOW - 3600,
     expiresAt: NOW + 7 * DAY,
     maxDepth: 2,
-    scope: scope({ window: win }, t.root),
+    scope: scope({ window: win, ...opt.scopes?.[0] }, t.root),
   });
   const v0 = await verifyChain({ mandates: [c0] }, ctx, ed25519Verifier);
   if (!v0.ok) throw new Error(`fixture c0: ${v0.step} ${v0.reason}`);
 
-  const c1 = await delegate(A, v0.value, {
+  const c1 = await delegate(A, v0.value.leaf, {
     subject: B.publicKey,
     issuedAt: NOW - 1800,
     expiresAt: NOW + 5 * DAY,
-    scope: scope({ maxNotional: USDC(30_000), maxLeverageBps: 300, window: win }, t.root),
+    scope: scope({ maxNotional: USDC(30_000), maxLeverageBps: 300, window: win, ...opt.scopes?.[1] }, t.root),
   });
   const v1 = await verifyChain({ mandates: [c0, c1] }, ctx, ed25519Verifier);
   if (!v1.ok) throw new Error(`fixture c1: ${v1.step} ${v1.reason}`);
 
-  const c2 = await delegate(B, v1.value, {
+  const c2 = await delegate(B, v1.value.leaf, {
     subject: C.publicKey,
     issuedAt: NOW - 600,
     expiresAt: NOW + 3 * DAY,
-    scope: scope({ maxNotional: USDC(10_000), maxLeverageBps: 200, window: win }, t.root),
+    scope: scope({ maxNotional: USDC(10_000), maxLeverageBps: 200, window: win, ...opt.scopes?.[2] }, t.root),
   });
 
   return { leader, A, B, C, D, c0, c1, c2, chain: { mandates: [c0, c1, c2] }, ctx, revoked, tree: t, assets };
@@ -161,7 +163,7 @@ export function orderBody(mandateId: Hex, over: Partial<OrderBody> = {}, w?: Wor
 export async function leafOf(w: World): Promise<VerifiedMandate> {
   const r = await verifyChain(w.chain, w.ctx, ed25519Verifier);
   if (!r.ok) throw new Error(`fixture leaf: ${r.step} ${r.reason}`);
-  return r.value;
+  return r.value.leaf;
 }
 
 export function expectReject<T>(r: Result<T>, step: Reject["step"], at?: number): Reject {

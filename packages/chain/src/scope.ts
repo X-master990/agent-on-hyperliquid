@@ -11,7 +11,7 @@ export function encodeAsset(asset: string): Uint8Array {
  * 子 scope ⊆ 父 scope（INV-10a）。
  * v0（ADR-0001，2026-10-22 決定）：assetsRoot 必須相等（不支援提供葉子證明真子集）；
  * maxNotional ≤；maxLeverageBps ≤；window 區間包含。
- * TODO(C3)：累計型（dailyLoss）、類別式白名單、OR。
+ * C3a（ADR-0004）：dailyNotional ≤。TODO(C3b)：dailyLoss；類別式白名單、OR 不支援。
  */
 export function isSubset(child: Scope, parent: Scope): boolean {
   if (child.assetsRoot !== parent.assetsRoot) return false;              // INV-10a：資產 root 相等
@@ -19,7 +19,11 @@ export function isSubset(child: Scope, parent: Scope): boolean {
   if (child.maxLeverageBps > parent.maxLeverageBps) return false;         // INV-10a：槓桿 ≤
   if (child.window.notBefore < parent.window.notBefore) return false;     // INV-10a：窗起點不得更早
   if (child.window.notAfter > parent.window.notAfter) return false;       // INV-10a：窗終點不得更晚
-  // TODO(C3): dailyLoss 不在 v0 判定
+  // C3a：dailyNotional ≤。省略 = 不限 = 最寬，父層有限制而子層省略即是放大 → 拒（INV-10a 只縮不放）
+  if (parent.dailyNotional !== undefined && (child.dailyNotional === undefined || child.dailyNotional > parent.dailyNotional)) {
+    return false;                                                         // INV-10a / INV-14
+  }
+  // TODO(C3b): dailyLoss 不判定
   return true;
 }
 

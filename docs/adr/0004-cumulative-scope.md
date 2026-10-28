@@ -1,7 +1,7 @@
 # ADR-0004: 累計型 scope 的設計（C3）
 
 - 日期：2026-10-28
-- 狀態：採納（設計）；C3a 未實作
+- 狀態：採納；C3a 已實作（同日，INV-14 升格）；C3b 未實作
 
 ## 背景
 單筆限額擋不住一萬筆小單——plan.md 把累計型標為 MVP 關鍵。spec 原本整列 TODO：度量什麼、起算點、重置、誰記、以什麼為鍵。
@@ -15,8 +15,8 @@
 6. **不變量升格**：C3a 實作與負面測試落地後，新增 **INV-14**：「同一 UTC 日內，經某 mandate 放行的訂單 Σnotional ≤ 該 mandate 的 `dailyNotional`，鏈上每層各自成立。」
 7. **電路**：累計 = 狀態差值證明；對齊 Phase 3 k=4 電路的預留。
 
-## 實作前提（待提議的型別變更）
-verifyOrder 要對鏈上每一層記帳，需要讀到每層的 `(mandateId, scope)`——但 `verifyChain` 目前只回傳 leaf 的 `VerifiedMandate`。需要型別變更（例如回傳全層的 `VerifiedMandate` 陣列），依 CLAUDE.md「要改型別先提議」，實作前另行提議。
+## 實作前提（型別變更，2026-10-28 已核准並落地）
+verifyOrder 要對鏈上每一層記帳，需要逐層的 `(mandateId, scope)`。`verifyChain` 的回傳型別改為 `Result<VerifiedChain>`（`{ leaf, layers }`，layers 為全層 `VerifiedMandate`，深凍結）。
 
 ## 選項與取捨
 | 選項 | 優點 | 缺點 |

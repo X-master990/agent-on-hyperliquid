@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { ed25519Verifier } from "@mandate/core";
-import { MemoryNonceStore, MemoryRevocationList, NoopCumulativeState, PolicyVerifier } from "@mandate/verifier";
+import { MemoryCumulativeState, MemoryNonceStore, MemoryRevocationList, PolicyVerifier, utcDay } from "@mandate/verifier";
 import { makeWorld, orderBody, signOrder, expectOk, AUD, NOW, USDC, type World } from "../../chain/test/fixtures.js";
 import { makeVerifier } from "./helpers.js";
 
@@ -58,7 +58,7 @@ describe("verifier/happy-path", () => {
       trustedRoots: new Set([w.leader.publicKey]),
       nonces: new MemoryNonceStore(),
       revocations: new MemoryRevocationList(),
-      cumulative: new NoopCumulativeState(),
+      cumulative: new MemoryCumulativeState(),
       sigv: ed25519Verifier,
     });
     const real = Math.floor(Date.now() / 1000);
@@ -96,6 +96,25 @@ describe("verifier/nonce-store", () => {
     s.prune(NOW + 5000);
     expect(s.size()).toBe(0);
     expect(s.seenOrRecord(SUBJ_A, `0x${"01".repeat(32)}`, NOW + 6000)).toBe(false); // 清掉後可再用（它已過期，單本身會被 time 擋）
+  });
+});
+
+describe("verifier/cumulative-state", () => {
+  it("usedOn defaults to 0n; charge accumulates per (mandateId, day); prune clears old days", () => {
+    const s = new MemoryCumulativeState();
+    const id = `0x${"aa".repeat(32)}` as const;
+    const id2 = `0x${"bb".repeat(32)}` as const;
+    const day = utcDay(NOW);
+    expect(s.usedOn(id, day)).toBe(0n);
+    s.charge(id, day, 100n);
+    s.charge(id, day, 23n);
+    expect(s.usedOn(id, day)).toBe(123n);
+    expect(s.usedOn(id2, day)).toBe(0n); // 不同 mandate 不同鍵
+    expect(s.usedOn(id, day + 1)).toBe(0n); // 不同日不同鍵（UTC 日界重置，ADR-0004）
+    s.charge(id, day + 1, 7n);
+    s.prune(day + 1);
+    expect(s.usedOn(id, day)).toBe(0n); // 舊日已清
+    expect(s.usedOn(id, day + 1)).toBe(7n);
   });
 });
 

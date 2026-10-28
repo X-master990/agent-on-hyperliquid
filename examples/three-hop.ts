@@ -22,7 +22,7 @@ import {
   type Scope,
   type VerifyContext,
 } from "@mandate/chain";
-import { MemoryNonceStore, MemoryRevocationList, NoopCumulativeState, PolicyVerifier } from "@mandate/verifier";
+import { MemoryCumulativeState, MemoryNonceStore, MemoryRevocationList, PolicyVerifier } from "@mandate/verifier";
 
 const DAY = 86_400;
 const NOW = Math.floor(Date.now() / 1000);
@@ -49,7 +49,13 @@ async function main() {
   const tree = buildTree(ASSETS.map(encodeAsset));
   const proofFor = (asset: string) => getProof(tree, ASSETS.indexOf(asset));
   const window = { notBefore: NOW - DAY, notAfter: NOW + 30 * DAY };
-  const scope = (maxNotional: bigint, maxLeverageBps: number): Scope => ({ assetsRoot: tree.root, maxNotional, maxLeverageBps, window });
+  const scope = (maxNotional: bigint, maxLeverageBps: number, dailyNotional?: bigint): Scope => ({
+    assetsRoot: tree.root,
+    maxNotional,
+    maxLeverageBps,
+    window,
+    ...(dailyNotional !== undefined ? { dailyNotional } : {}),
+  });
 
   // 3. 驗證上下文與政策驗證器
   const nonces = new MemoryNonceStore();
@@ -65,7 +71,7 @@ async function main() {
     trustedRoots: new Set([leader.publicKey]),
     nonces,
     revocations,
-    cumulative: new NoopCumulativeState(),
+    cumulative: new MemoryCumulativeState(),
     sigv: ed25519Verifier,
     clock: () => NOW,
   });
@@ -77,16 +83,16 @@ async function main() {
     issuedAt: NOW - 60,
     expiresAt: NOW + 7 * DAY,
     maxDepth: 2,
-    scope: scope(USDC(100_000), 500),
+    scope: scope(USDC(100_000), 500, USDC(50_000)),
   });
   const v0 = await verifyChain({ mandates: [c0] }, ctx, ed25519Verifier);
   if (!v0.ok) throw new Error(`c0: ${v0.reason}`);
 
-  const c1 = await delegate(A, v0.value, { subject: B.publicKey, issuedAt: NOW - 30, expiresAt: NOW + 5 * DAY, scope: scope(USDC(30_000), 300) });
+  const c1 = await delegate(A, v0.value.leaf, { subject: B.publicKey, issuedAt: NOW - 30, expiresAt: NOW + 5 * DAY, scope: scope(USDC(30_000), 300, USDC(20_000)) });
   const v1 = await verifyChain({ mandates: [c0, c1] }, ctx, ed25519Verifier);
   if (!v1.ok) throw new Error(`c1: ${v1.reason}`);
 
-  const c2 = await delegate(B, v1.value, { subject: C.publicKey, issuedAt: NOW - 10, expiresAt: NOW + 3 * DAY, scope: scope(USDC(10_000), 200) });
+  const c2 = await delegate(B, v1.value.leaf, { subject: C.publicKey, issuedAt: NOW - 10, expiresAt: NOW + 3 * DAY, scope: scope(USDC(10_000), 200, USDC(16_000)) });
   const chain: Chain = { mandates: [c0, c1, c2] };
   const v2 = await verifyChain(chain, ctx, ed25519Verifier);
   if (!v2.ok) throw new Error(`c2: ${v2.reason}`);
@@ -125,7 +131,7 @@ async function main() {
 
   // (a) B 給 C 4x —— delegate() 直接拒絕；硬簽出來的鏈在驗證時被擋
   try {
-    await delegate(B, v1.value, { subject: C.publicKey, issuedAt: NOW - 10, expiresAt: NOW + 3 * DAY, scope: scope(USDC(10_000), 400) });
+    await delegate(B, v1.value.leaf, { subject: C.publicKey, issuedAt: NOW - 10, expiresAt: NOW + 3 * DAY, scope: scope(USDC(10_000), 400) });
   } catch (e) {
     console.log(`delegate() threw:             B → C @4x  — ${(e as Error).message}`);
   }
@@ -154,6 +160,10 @@ async function main() {
   // (e) 偽造 c0：D 自簽一張「leader 授權」
   const fakeRoot = await issueRoot(D, { subject: C.publicKey, audience: AUD, issuedAt: NOW - 60, expiresAt: NOW + DAY, maxDepth: 0, scope: scope(USDC(1_000_000), 5000) });
   show("D 自簽根授權給 C", await pv.verifyOrder({ mandates: [fakeRoot] }, await signOrder(C, makeOrder({ mandateId: fakeRoot.body.mandateId }))));
+
+  // (f) 累計型（INV-14 / C3a）：c2 每日上限 16k，前面已入帳 8k
+  show("C 同日再下 3k（累計 11k ≤ 16k）", await pv.verifyOrder(chain, await signOrder(C, makeOrder({ notional: USDC(3_000) }))));
+  show("C 同日再下 6k（累計將達 17k）", await pv.verifyOrder(chain, await signOrder(C, makeOrder({ notional: USDC(6_000) }))));
 
   // 加碼：超額、撤銷
   show("C 下 12k（上限 10k）", await pv.verifyOrder(chain, await signOrder(C, makeOrder({ notional: USDC(12_000) }))));

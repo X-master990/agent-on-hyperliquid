@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { TAG, tagged, canonicalBytes, getProof, toHex, randomBytes, type Hex } from "@mandate/core";
 import { CLOCK_SKEW_S, encodeAsset, type OrderBody, type Order } from "@mandate/chain";
-import { MemoryNonceStore, type NonceStore } from "@mandate/verifier";
+import { MemoryNonceStore, utcDay, type NonceStore } from "@mandate/verifier";
 import {
   makeWorld,
   makeTree,
@@ -283,6 +283,72 @@ describe("verifier/attacks", () => {
     const tampered = { body: { ...signed.body, leverageBps: 1.5 }, sig: signed.sig };
     expectReject(await pv.verifyOrder(w.chain, tampered), "fields");
     await expect(signOrder(w.C, orderBody(leafId, { leverageBps: 1.5 }))).rejects.toThrow(/non-integer/);
+  });
+
+  /* ---------- INV-14（C3a 累計型，ADR-0004） ---------- */
+
+  it("INV-14: daily notional cap — orders accumulate until the cap, the crossing order rejects at 'scope'", async () => {
+    const ww = await makeWorld({ scopes: [{ dailyNotional: USDC(50_000) }, { dailyNotional: USDC(20_000) }, { dailyNotional: USDC(12_000) }] });
+    const { pv } = makeVerifier(ww);
+    const id = ww.c2.body.mandateId;
+    expectOk(await pv.verifyOrder(ww.chain, await signOrder(ww.C, orderBody(id, {}, ww))));                           // 8k → 累計 8k
+    expectOk(await pv.verifyOrder(ww.chain, await signOrder(ww.C, orderBody(id, { notional: USDC(4_000) }, ww))));    // 12k = 上限，收
+    const r = expectReject(await pv.verifyOrder(ww.chain, await signOrder(ww.C, orderBody(id, { notional: 1n }, ww))), "scope");
+    expect(r.reason).toMatch(/daily notional/);
+    expect(r.at).toBe(2); // 擋在 leaf 那一層
+  });
+
+  it("INV-14: two sibling sub-mandates cannot double the parent's daily budget (per-layer accounting)", async () => {
+    const ww = await makeWorld({ scopes: [{ dailyNotional: USDC(50_000) }, { dailyNotional: USDC(15_000) }, { dailyNotional: USDC(10_000) }] });
+    const { pv } = makeVerifier(ww);
+    // B 另發一張合法的兄弟授權 c2'（10k ≤ 15k，subject 同樣是 C）
+    const c2b = await signMandate(ww.B, { ...ww.c2.body, mandateId: toHex(randomBytes(32)) });
+    // 經 c2 下 8k：c2 與 c1 各累計 8k
+    expectOk(await pv.verifyOrder(ww.chain, await signOrder(ww.C, orderBody(ww.c2.body.mandateId, {}, ww))));
+    // 經 c2' 再下 8k：c2' 自己額度夠（8k ≤ 10k），但 c1 將達 16k > 15k → 擋在第 1 層
+    const r = expectReject(
+      await pv.verifyOrder({ mandates: [ww.c0, ww.c1, c2b] }, await signOrder(ww.C, orderBody(c2b.body.mandateId, {}, ww))),
+      "scope",
+    );
+    expect(r.reason).toMatch(/daily notional/);
+    expect(r.at).toBe(1);
+  });
+
+  it("INV-14: rejected orders do not consume daily budget (charge only after full accept)", async () => {
+    // 注意順序（INV-13）：累計檢查在 nonce 之前，所以「會爆額度的重放」擋在 'scope'；
+    // 這裡的上限取 20k，讓重放通過第 8 步、真正死在 'nonce'，以驗證它沒有入帳。
+    const ww = await makeWorld({ scopes: [{}, {}, { dailyNotional: USDC(20_000) }] });
+    const { pv } = makeVerifier(ww);
+    const id = ww.c2.body.mandateId;
+    const good = await signOrder(ww.C, orderBody(id, {}, ww)); // 8k
+    expectOk(await pv.verifyOrder(ww.chain, good));
+    expectReject(await pv.verifyOrder(ww.chain, good), "nonce");                                        // 重放：不得入帳
+    expectReject(await pv.verifyOrder(ww.chain, await signOrder(ww.A, orderBody(id, {}, ww))), "sig");  // 壞簽章：不得入帳
+    // 若上面任一筆有入帳（會到 16k+），這筆 10k（8+10 = 18 ≤ 20k）會被誤拒
+    expectOk(await pv.verifyOrder(ww.chain, await signOrder(ww.C, orderBody(id, { notional: USDC(10_000) }, ww))));
+  });
+
+  it("INV-14: a cap-busting replay is rejected at 'scope' before 'nonce' (INV-13 order) and still burns nothing", async () => {
+    const ww = await makeWorld({ scopes: [{}, {}, { dailyNotional: USDC(10_000) }] });
+    const { pv, nonces } = makeVerifier(ww);
+    const id = ww.c2.body.mandateId;
+    const good = await signOrder(ww.C, orderBody(id, {}, ww)); // 8k → 累計 8k
+    expectOk(await pv.verifyOrder(ww.chain, good));
+    // 重放 8k：8+8 = 16 > 10k → 第 8 步就擋（@scope），不消耗 nonce、不入帳
+    expectReject(await pv.verifyOrder(ww.chain, good), "scope");
+    expect(nonces.size()).toBe(1);
+    expectOk(await pv.verifyOrder(ww.chain, await signOrder(ww.C, orderBody(id, { notional: USDC(2_000) }, ww)))); // 8+2 = 10 ≤ 10k
+  });
+
+  it("INV-14: budget resets at the UTC day boundary", async () => {
+    const ww = await makeWorld({ scopes: [{}, {}, { dailyNotional: USDC(10_000) }] });
+    let now = NOW;
+    const { pv } = makeVerifier(ww, { clock: () => now });
+    const id = ww.c2.body.mandateId;
+    expectOk(await pv.verifyOrder(ww.chain, await signOrder(ww.C, orderBody(id, {}, ww))));             // 8k
+    expectReject(await pv.verifyOrder(ww.chain, await signOrder(ww.C, orderBody(id, { notional: USDC(3_000) }, ww))), "scope"); // 11k > 10k
+    now = (utcDay(NOW) + 1) * 86_400; // 跨 UTC 日界（仍在授權與 window 有效期內）
+    expectOk(await pv.verifyOrder(ww.chain, await signOrder(ww.C, orderBody(id, { issuedAt: now - 10, expiresAt: now + 60 }, ww)))); // 額度歸零，8k 再收
   });
 
   /* ---------- 撤銷 ---------- */

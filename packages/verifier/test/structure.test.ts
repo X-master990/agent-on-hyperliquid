@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Ed25519Signer, ed25519Verifier } from "@mandate/core";
-import { MemoryNonceStore, MemoryRevocationList, NoopCumulativeState, type PolicyVerifierOptions } from "@mandate/verifier";
+import { MemoryCumulativeState, MemoryNonceStore, MemoryRevocationList, type PolicyVerifierOptions } from "@mandate/verifier";
 
 const ROOT = join(__dirname, "..", "..");
 const srcFiles = (pkg: string) =>
@@ -21,7 +21,7 @@ describe("verifier/structure", () => {
       trustedRoots: new Set([Ed25519Signer.random().publicKey]),
       nonces: new MemoryNonceStore(),
       revocations: new MemoryRevocationList(),
-      cumulative: new NoopCumulativeState(),
+      cumulative: new MemoryCumulativeState(),
       sigv: ed25519Verifier,
     };
     // @ts-expect-error — 驗證器選項不接受 signer（INV-11）

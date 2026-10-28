@@ -48,8 +48,11 @@ export function scopeProblem(s: unknown): string | null {
     return "scope.window: expected {notBefore, notAfter} integers";
   }
   if (w.notBefore > w.notAfter) return "scope.window: notBefore > notAfter";
+  if (s.dailyNotional !== undefined && !isNonNegBigint(s.dailyNotional)) {
+    return "scope.dailyNotional: expected non-negative bigint"; // INV-4（C3a，ADR-0004）
+  }
   if (s.dailyLoss !== undefined && !isNonNegBigint(s.dailyLoss)) {
-    return "scope.dailyLoss: expected non-negative bigint"; // TODO(C3): v0 只檢型別，不判定
+    return "scope.dailyLoss: expected non-negative bigint"; // TODO(C3b): 只檢型別，不判定
   }
   return null;
 }

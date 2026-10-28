@@ -86,8 +86,10 @@ describe("chain/attacks", () => {
     expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, scope: { ...w.c0.body.scope, assetsRoot: "banana" } } as unknown as MandateBody)]), "fields", 0);
     // 負的 maxLeverageBps 若少了檢查會被接受（比較方向對負數「安全」，但那是運氣不是設計）
     expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, scope: { ...w.c0.body.scope, maxLeverageBps: -1 } } as unknown as MandateBody)]), "fields", 0);
-    // dailyLoss 型別：v0 不判定值（TODO C3），但型別必須今天就擋，否則 C3 上線即踩雷
+    // dailyLoss 型別：C3b 才判定值，但型別必須今天就擋，否則 C3b 上線即踩雷
     expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, scope: { ...w.c0.body.scope, dailyLoss: 5 } } as unknown as MandateBody)]), "fields", 0);
+    // dailyNotional 型別（C3a，INV-4）
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, scope: { ...w.c0.body.scope, dailyNotional: 5 } } as unknown as MandateBody)]), "fields", 0);
   });
 
   it("INV-4: inverted scope window (notBefore > notAfter) → reject at 'fields'", async () => {
@@ -152,6 +154,18 @@ describe("chain/attacks", () => {
       scope: { ...w.c2.body.scope, assetsRoot: makeTree(["BTC", "ETH", "SOL", "DOGE"]).root },
     });
     expectReject(await verify([w.c0, w.c1, c2b]), "scope", 2);
+  });
+
+  it("INV-10a/INV-14: child dailyNotional exceeding or dropping parent's → reject at 'scope'", async () => {
+    const c1a = await signMandate(w.A, { ...w.c1.body, scope: { ...w.c1.body.scope, dailyNotional: USDC(10_000) } });
+    // 加大 → 拒
+    const c2a = await signMandate(w.B, { ...w.c2.body, scope: { ...w.c2.body.scope, dailyNotional: USDC(20_000) } });
+    expectReject(await verify([w.c0, c1a, c2a]), "scope", 2);
+    // 省略（= 不限）也是放大 → 拒：原 c2 沒有 dailyNotional
+    expectReject(await verify([w.c0, c1a, w.c2]), "scope", 2);
+    // 自縮 → 收
+    const c2c = await signMandate(w.B, { ...w.c2.body, scope: { ...w.c2.body.scope, dailyNotional: USDC(5_000) } });
+    expectOk(await verify([w.c0, c1a, c2c]));
   });
 
   /* ---------- INV-10a: 鏈接 ---------- */
@@ -337,7 +351,7 @@ describe("chain/attacks", () => {
     });
     const body = { ...w.c2.body, scope: scopeObj };
     const sig = w.c2.sig; // 原簽章對 200
-    const leaf = expectOk(await verify([w.c0, w.c1, { body, sig }]));
+    const leaf = expectOk(await verify([w.c0, w.c1, { body, sig }])).leaf;
     expect(leaf.body.scope.maxLeverageBps).toBe(200);
     expect(reads).toBe(1);
   });

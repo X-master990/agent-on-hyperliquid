@@ -13,7 +13,9 @@ export interface Scope {
   /** 槓桿 ×100（3x = 300），避免浮點 */
   maxLeverageBps: number;
   window: TimeWindow;
-  /** 累計型，v0 不判定（TODO C3） */
+  /** 每日累計名目上限（C3a，ADR-0004 / INV-14）：同一 UTC 日內經此授權放行的 Σnotional ≤ 此值。省略 = 不限。 */
+  dailyNotional?: bigint;
+  /** 每日虧損上限（C3b）：依賴成交回報，尚不判定，僅檢型別 */
   dailyLoss?: bigint;
 }
 
@@ -46,6 +48,16 @@ export type VerifiedMandate = Readonly<Mandate> & {
   readonly [VERIFIED]: true;
   readonly depth: number;  // 0 = 根
 };
+
+/**
+ * verifyChain 的完整結果（ADR-0004 實作前提，2026-10-28 核准的型別變更）：
+ * layers = c₀…cₙ 全層（每張都已通過驗證），leaf = layers 的最後一張。
+ * 累計型記帳需要逐層的 (mandateId, scope)（INV-14：一單入帳每一層）。
+ */
+export interface VerifiedChain {
+  readonly leaf: VerifiedMandate;
+  readonly layers: readonly VerifiedMandate[];
+}
 
 /** c₀ … cₙ，由根到末端 */
 export interface Chain { mandates: Mandate[] }
