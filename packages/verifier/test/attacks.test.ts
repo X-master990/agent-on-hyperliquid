@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { TAG, tagged, canonicalBytes, getProof, toHex, randomBytes, type Hex } from "@mandate/core";
-import { encodeAsset, type OrderBody, type Order } from "@mandate/chain";
+import { CLOCK_SKEW_S, encodeAsset, type OrderBody, type Order } from "@mandate/chain";
 import { MemoryNonceStore, type NonceStore } from "@mandate/verifier";
 import {
   makeWorld,
@@ -117,6 +117,13 @@ describe("verifier/attacks", () => {
     }
   });
 
+  it("INV-8: zero notional / leverage → reject at 'fields' (positive integers required)", async () => {
+    // 零名目單無經濟意義，卻會消耗 nonce；spec §5 拍板值域 ≥ 1
+    const { pv } = makeVerifier(w);
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { notional: 0n }))), "fields");
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { leverageBps: 0 }))), "fields");
+  });
+
   it("INV-8: asset must be a non-empty string → reject at 'fields'", async () => {
     const { pv } = makeVerifier(w);
     expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { asset: "" }))), "fields");
@@ -175,18 +182,39 @@ describe("verifier/attacks", () => {
     const { pv } = makeVerifier(w);
     expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW - 120, expiresAt: NOW - 60 }))), "time");
     expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW - 120, expiresAt: NOW }))), "time"); // now < expiresAt 嚴格
-    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW + 5, expiresAt: NOW + 60 }))), "time"); // 未來
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW + CLOCK_SKEW_S + 1, expiresAt: NOW + 120 }))), "time"); // 未來（偏移容忍之外）
     const r = expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW, expiresAt: NOW }))), "time");
     expect(r.reason).toMatch(/issuedAt >= expiresAt/); // 釘住理由：由第一條時間檢查擋，不是靠「已過期」撿到（INV-13）
+  });
+
+  it("INV-9: issuedAt within +CLOCK_SKEW_S accepted; one second beyond rejected at 'time'", async () => {
+    const { pv } = makeVerifier(w);
+    // 邊界：剛好 +30s（發行方時鐘快 30 秒）要收
+    expectOk(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW + CLOCK_SKEW_S, expiresAt: NOW + 120 }))));
+    // +31s 拒；expiresAt 沒有任何容忍（過期判定嚴格）
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW + CLOCK_SKEW_S + 1, expiresAt: NOW + 120 }))), "time");
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { issuedAt: NOW - 120, expiresAt: NOW }))), "time");
+  });
+
+  it("INV-9: nonce ledger keyed by (subject, nonce) — another subject cannot burn C's nonce", async () => {
+    const { pv, nonces } = makeVerifier(w);
+    const n = toHex(randomBytes(32));
+    // B 先用自己的鏈（到 c1）消耗同一個 nonce 值
+    expectOk(await pv.verifyOrder({ mandates: [w.c0, w.c1] }, await signOrder(w.B, orderBody(w.c1.body.mandateId, { nonce: n }))));
+    // C 用同一個 nonce 值仍然通過（不同 subject，不同鍵）
+    expectOk(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { nonce: n }))));
+    // C 自己重用才是重放
+    expectReject(await pv.verifyOrder(w.chain, await signOrder(w.C, orderBody(leafId, { nonce: n }))), "nonce");
+    expect(nonces.size()).toBe(2);
   });
 
   it("INV-9: nonce store is not consulted for orders rejected earlier (no nonce burn)", async () => {
     const calls: string[] = [];
     const inner = new MemoryNonceStore();
     const spy: NonceStore = {
-      seenOrRecord: (n, e) => {
+      seenOrRecord: (s, n, e) => {
         calls.push(n);
-        return inner.seenOrRecord(n, e);
+        return inner.seenOrRecord(s, n, e);
       },
       prune: (t) => inner.prune(t),
       size: () => inner.size(),

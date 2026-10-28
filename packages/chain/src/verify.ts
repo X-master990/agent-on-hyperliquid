@@ -14,7 +14,7 @@ import type { Chain, Mandate, MandateBody, Result, VerifiedMandate, VerifyContex
  *   4. i == 0：issuer ∈ trustedRoots（INV-12）且 parentId == null
  *      i  > 0：issuer == cᵢ₋₁.subject && parentId == cᵢ₋₁.mandateId（INV-10a）
  *   5. audience == ctx.audience（INV-5）
- *   6. issuedAt < expiresAt；issuedAt ≤ now < expiresAt；expiresAt ≤ 上層 expiresAt
+ *   6. issuedAt < expiresAt；issuedAt ≤ now + CLOCK_SKEW_S；now < expiresAt；expiresAt ≤ 上層 expiresAt
  *   7. !isRevoked(mandateId)
  *   8. i > 0：maxDepth == 上層 − 1（INV-10a）；isSubset(cᵢ.scope, cᵢ₋₁.scope)（INV-10a）
  * 任一步失敗 → Reject{step, at: i}；不繼續。
@@ -23,11 +23,18 @@ import type { Chain, Mandate, MandateBody, Result, VerifiedMandate, VerifyContex
  * 所以「用 ORDER tag 簽的東西冒充授權」會在 'sig' 步驟被擋（簽章對不上 MANDATE tag）；
  * 'tag' 步驟能擋的是版本不符（body.v ≠ 1）與沒有 body 的輸入。
  */
+/** 時鐘偏移容忍（秒）：只放寬 issuedAt，expiresAt 嚴格（spec/scope-semantics.md §4-§5）。 */
+export const CLOCK_SKEW_S = 30;
+/** 鏈長上限：輸入有界（spec §5）。 */
+export const MAX_CHAIN_LENGTH = 16;
+
 export async function verifyChain(chain: Chain, ctx: VerifyContext, sigv: SigVerifier): Promise<Result<VerifiedMandate>> {
   if (!isPlainObject(chain) || !Array.isArray(chain.mandates) || chain.mandates.length === 0) {
     return reject("fields", "chain.mandates must be a non-empty array");
   }
-  // TODO(spec): 鏈長上限（DoS）。v0 只由 c₀.maxDepth 間接限制；c₀ 不可信時第一步就在 'root' 停。
+  if (chain.mandates.length > MAX_CHAIN_LENGTH) {
+    return reject("fields", `chain too long (> ${MAX_CHAIN_LENGTH})`); // INV-4：鏈輸入有界
+  }
   let prev: VerifiedMandate | null = null;
   for (let i = 0; i < chain.mandates.length; i++) {
     const r = await verifyOne(chain.mandates[i], i, prev, ctx, sigv);
@@ -85,14 +92,14 @@ async function verifyOne(
   // 5. audience（INV-5）
   if (body.audience !== ctx.audience) return reject("audience", "audience is not this verifier", i);    // INV-5
 
-  // 6. 生命週期。TODO(spec): 時鐘偏移容忍值；v0 為 0。
+  // 6. 生命週期。時鐘偏移只放寬 issuedAt（+CLOCK_SKEW_S），expiresAt 嚴格（spec §4）。
   if (!(body.issuedAt < body.expiresAt)) return reject("time", "issuedAt >= expiresAt", i);
-  if (!(body.issuedAt <= ctx.now)) return reject("time", "issuedAt is in the future", i);
+  if (!(body.issuedAt <= ctx.now + CLOCK_SKEW_S)) return reject("time", "issuedAt is in the future", i);
   if (!(ctx.now < body.expiresAt)) return reject("time", "mandate expired", i);
   if (prev !== null && body.expiresAt > prev.body.expiresAt) {
     return reject("time", "child expiresAt exceeds parent expiresAt", i);
   }
-  // TODO(spec): 子授權 issuedAt 是否必須 ≥ 父授權 issuedAt；v0 不檢。
+  // 拍板（spec §4）：子授權 issuedAt 不要求 ≥ 父授權；issuedAt 僅供審計，不參與授權判定。
 
   // 7. 撤銷（撤銷清單出錯視為已撤銷：fail closed）
   let revoked = true;

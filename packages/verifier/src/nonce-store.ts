@@ -1,13 +1,14 @@
-import type { Hex } from "@mandate/core";
+import type { Hex, PubKey } from "@mandate/core";
 
 /**
- * 未過期 nonce 集合（INV-9）。獨立於交易所。
+ * 未過期 nonce 帳本（INV-9）。獨立於交易所。
+ * 鍵為 (subject, nonce)（spec §5 拍板）：防跨 subject 惡意佔用——
+ * 看見他人在途 nonce 的攻擊者，無法用自己的合法單搶先燒掉它。
  * seenOrRecord() 必須原子：檢查 + 記錄一次完成，避免並發重放。
- * TODO(spec): nonce 命名空間——v0 為全域（nonce 是 32 bytes 隨機值，跨 subject 撞到視為不可能）。
  */
 export interface NonceStore {
-  /** 已見過 → true；否則記錄並回 false */
-  seenOrRecord(nonce: Hex, expiresAt: number): boolean;
+  /** 同一 (subject, nonce) 已見過 → true；否則記錄並回 false */
+  seenOrRecord(subject: PubKey, nonce: Hex, expiresAt: number): boolean;
   /** 清掉 expiresAt < now 的 nonce */
   prune(now: number): void;
   size(): number;
@@ -19,17 +20,18 @@ export interface NonceStore {
  * 尚未 prune 的過期 nonce 仍視為「已見過」（較保守）。
  */
 export class MemoryNonceStore implements NonceStore {
-  readonly #seen = new Map<Hex, number>();
+  readonly #seen = new Map<string, number>();
 
-  seenOrRecord(nonce: Hex, expiresAt: number): boolean {
-    if (this.#seen.has(nonce)) return true; // INV-9
-    this.#seen.set(nonce, expiresAt);
+  seenOrRecord(subject: PubKey, nonce: Hex, expiresAt: number): boolean {
+    const key = `${subject}:${nonce}`;
+    if (this.#seen.has(key)) return true; // INV-9
+    this.#seen.set(key, expiresAt);
     return false;
   }
 
   prune(now: number): void {
-    for (const [nonce, exp] of this.#seen) {
-      if (exp < now) this.#seen.delete(nonce);
+    for (const [key, exp] of this.#seen) {
+      if (exp < now) this.#seen.delete(key);
     }
   }
 

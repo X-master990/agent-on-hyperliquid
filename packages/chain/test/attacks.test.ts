@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { TAG, tagged, canonicalBytes, ed25519Verifier, fromHex, toHex, randomBytes } from "@mandate/core";
-import { delegate, issueRoot, verifyChain, type Mandate, type MandateBody, type VerifyContext } from "@mandate/chain";
+import { CLOCK_SKEW_S, MAX_CHAIN_LENGTH, delegate, issueRoot, verifyChain, type Mandate, type MandateBody, type VerifyContext } from "@mandate/chain";
 import { makeWorld, makeTree, scope, signMandate, expectReject, expectOk, NOW, DAY, USDC, AUD, type World } from "./fixtures.js";
 
 /** 每條不變量至少一個負面測試。名稱以 INV-n 開頭。 */
@@ -96,6 +96,11 @@ describe("chain/attacks", () => {
       scope: { ...w.c0.body.scope, window: { notBefore: NOW + DAY, notAfter: NOW - DAY } },
     } as unknown as MandateBody);
     expectReject(await verify([m]), "fields", 0);
+  });
+
+  it("INV-4: chain longer than MAX_CHAIN_LENGTH → reject at 'fields' before any verification", async () => {
+    const r = expectReject(await verify(Array(MAX_CHAIN_LENGTH + 1).fill(w.c0)), "fields");
+    expect(r.reason).toMatch(/too long/);
   });
 
   /* ---------- INV-5 ---------- */
@@ -239,6 +244,13 @@ describe("chain/attacks", () => {
 
   it("time: issuedAt in the future → reject at 'time'", async () => {
     expectReject(await verify(w.chain.mandates, { ...w.ctx, now: NOW - 7200 }), "time", 0);
+  });
+
+  it("time: issuedAt within +CLOCK_SKEW_S accepted; one second beyond rejected", async () => {
+    // 發行方時鐘快 30 秒要收；快 31 秒拒。expiresAt 沒有容忍。
+    expectOk(await verify([await signMandate(w.leader, { ...w.c0.body, issuedAt: NOW + CLOCK_SKEW_S })]));
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, issuedAt: NOW + CLOCK_SKEW_S + 1 })]), "time", 0);
+    expectReject(await verify([await signMandate(w.leader, { ...w.c0.body, issuedAt: NOW - 120, expiresAt: NOW })]), "time", 0);
   });
 
   it("time: issuedAt >= expiresAt → reject at 'time'", async () => {

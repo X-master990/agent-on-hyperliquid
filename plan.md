@@ -114,7 +114,7 @@ Hyperliquid builder code：`approveBuilderFee` 讓 builder 對經手訂單收費
 
 ### Phase 0 — 規格與簽章版（對應模組 B、C）
 - `spec/scope-semantics.md`：3.1 的七種範圍、⊆ 定義、累計狀態語意、不支援項
-- `docs/invariants.md`、`docs/adr/0001-v0-scopes.md`
+- `docs/invariants.md`、`docs/adr/0001-v0-scope-types.md`
 - `packages/chain`：issue / delegate / verify（n 層）
 - `packages/verifier`：簽章版
 - 對抗測試：超額、超槓桿、不在白名單、日虧損累計超限、過期、重放、換 audience、別人鑰匙、中間層放大、Merkle 第二原像

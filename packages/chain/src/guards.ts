@@ -90,9 +90,9 @@ export function orderBodyProblem(b: unknown): string | null {
   if (typeof b.asset !== "string" || b.asset.length === 0) return "asset: expected non-empty string";
   const pp = merkleProofProblem(b.assetProof);
   if (pp) return pp;
-  // TODO(spec): notional / leverageBps 的值域（是否必須 > 0）；v0 只要求非負整數。
-  if (!isNonNegBigint(b.notional)) return "notional: expected non-negative bigint";
-  if (!isNonNegInt(b.leverageBps)) return "leverageBps: expected non-negative integer";
+  // 拍板（spec §5）：訂單側 notional / leverageBps 必須 ≥ 1；scope 側上限可為 0（關閘語意）。
+  if (typeof b.notional !== "bigint" || b.notional < 1n) return "notional: expected positive bigint";  // INV-8
+  if (!isSafeInt(b.leverageBps) || b.leverageBps < 1) return "leverageBps: expected positive integer"; // INV-8
   if (b.side !== "buy" && b.side !== "sell") return "side: expected 'buy' | 'sell'";
   return null;
 }

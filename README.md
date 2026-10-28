@@ -2,7 +2,7 @@
 
 AI agent 授權鏈：人 → 交易 agent → 子 agent，每層只縮不放；第一個戰場是 Hyperliquid。
 
-- 專案計畫：`../plan.md`（v0.2）
+- 專案計畫：`plan.md`（v0.2）
 - 不變量：`docs/invariants.md` ← agent 動手前必讀
 - 決策紀錄：`docs/adr/`
 - 範圍語意：`spec/scope-semantics.md`（Phase 0 寫）

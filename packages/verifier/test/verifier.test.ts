@@ -70,27 +70,32 @@ describe("verifier/happy-path", () => {
 });
 
 describe("verifier/nonce-store", () => {
-  it("seenOrRecord: first call records (false), second call reports seen (true)", () => {
+  const SUBJ_A = `0x${"f1".repeat(32)}` as const;
+  const SUBJ_B = `0x${"f2".repeat(32)}` as const;
+
+  it("seenOrRecord: first call records (false), second call reports seen (true); keyed by (subject, nonce)", () => {
     const s = new MemoryNonceStore();
     const n = `0x${"aa".repeat(32)}` as const;
-    expect(s.seenOrRecord(n, NOW + 60)).toBe(false);
-    expect(s.seenOrRecord(n, NOW + 60)).toBe(true);
-    expect(s.seenOrRecord(n, NOW + 999)).toBe(true); // 不同 expiresAt 也算同一個 nonce
-    expect(s.size()).toBe(1);
+    expect(s.seenOrRecord(SUBJ_A, n, NOW + 60)).toBe(false);
+    expect(s.seenOrRecord(SUBJ_A, n, NOW + 60)).toBe(true);
+    expect(s.seenOrRecord(SUBJ_A, n, NOW + 999)).toBe(true); // 不同 expiresAt 也算同一個 nonce
+    // 不同 subject 用同一個 nonce 值是不同的鍵（INV-9，spec §5）
+    expect(s.seenOrRecord(SUBJ_B, n, NOW + 60)).toBe(false);
+    expect(s.size()).toBe(2);
   });
 
   it("prune() removes expired nonces", () => {
     const s = new MemoryNonceStore();
-    s.seenOrRecord(`0x${"01".repeat(32)}`, NOW + 10);
-    s.seenOrRecord(`0x${"02".repeat(32)}`, NOW + 100);
-    s.seenOrRecord(`0x${"03".repeat(32)}`, NOW + 1000);
+    s.seenOrRecord(SUBJ_A, `0x${"01".repeat(32)}`, NOW + 10);
+    s.seenOrRecord(SUBJ_A, `0x${"02".repeat(32)}`, NOW + 100);
+    s.seenOrRecord(SUBJ_A, `0x${"03".repeat(32)}`, NOW + 1000);
     expect(s.size()).toBe(3);
     s.prune(NOW + 100); // 清掉 expiresAt < now：只有 +10
     expect(s.size()).toBe(2);
-    expect(s.seenOrRecord(`0x${"02".repeat(32)}`, NOW + 100)).toBe(true); // == now 的還在
+    expect(s.seenOrRecord(SUBJ_A, `0x${"02".repeat(32)}`, NOW + 100)).toBe(true); // == now 的還在
     s.prune(NOW + 5000);
     expect(s.size()).toBe(0);
-    expect(s.seenOrRecord(`0x${"01".repeat(32)}`, NOW + 6000)).toBe(false); // 清掉後可再用（它已過期，單本身會被 time 擋）
+    expect(s.seenOrRecord(SUBJ_A, `0x${"01".repeat(32)}`, NOW + 6000)).toBe(false); // 清掉後可再用（它已過期，單本身會被 time 擋）
   });
 });
 

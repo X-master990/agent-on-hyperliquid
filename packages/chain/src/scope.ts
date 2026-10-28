@@ -33,7 +33,7 @@ export function orderWithinScope(order: OrderBody, scope: Scope, now: number): b
   if (order.leverageBps > scope.maxLeverageBps) return false;             // INV-10b：leverage ≤ maxLeverage
   const { notBefore, notAfter } = scope.window;
   if (order.issuedAt < notBefore || order.issuedAt > notAfter) return false; // INV-10b：issuedAt ∈ window
-  // TODO(spec): 「時間 ∈ window」是否也要求驗證當下在窗內；v0 兩者都檢（較嚴）。
+  // 拍板（spec §4）：issuedAt 與驗證當下兩者都要在窗內——窗外執行即拒，從嚴。
   if (now < notBefore || now > notAfter) return false;                    // INV-10b：now ∈ window
   return true;
 }

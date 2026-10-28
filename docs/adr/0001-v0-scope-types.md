@@ -2,14 +2,15 @@
 
 - 日期：2026-10-21
 - 狀態：採納
+- 修訂：2026-10-28 — 資產白名單拍板「只做 root 相等」，刪除「子層提供整棵樹」分支（從未實作）；欄位名訂正為 `maxLeverageBps`。
 
 ## 背景
 完整的 scope 語意（類別式白名單、累計型限額、OR 組合）是模組 C3 的題目，尚未學完也未寫 spec。但 chain v0 需要一個能運作的 `isSubset()`。
 
 ## 決定
 v0 的 `Scope` 只含三類、⊆ 關係顯而易見的欄位：
-1. 資產白名單：Merkle root；子集關係在 v0 以「子層 root 必須等於父層 root，或子層提供整棵樹且為父層子集」判定
-2. 數值上限：`maxNotional`、`maxLeverage`，⊆ 即 ≤
+1. 資產白名單：Merkle root；子集關係在 v0 以「子層 root 必須等於父層 root」判定。不支援提供葉子證明真子集——兩個 root 之間的子集關係無從計算，真子集判定留給 ZK 版（spec/scope-semantics.md §2）。
+2. 數值上限：`maxNotional`、`maxLeverageBps`，⊆ 即 ≤
 3. 時間窗：`window.notBefore/notAfter`，⊆ 即區間包含
 
 累計型（`dailyLoss`）保留欄位但不在 v0 判定；`orderTypes`、類別式白名單不在 v0。
